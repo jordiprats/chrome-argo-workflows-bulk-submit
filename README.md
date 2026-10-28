@@ -48,7 +48,7 @@ Each workflow must finish before the next starts. Results are shown inline.
 4. The extension automatically detects regions and clusters from your `helm-create-*` templates. Tick the ones you want.
 5. Click **Validate** to dry-run every line, or **Run** to submit.
 
-   Each line runs once per selected region/cluster combination (one cluster finishes before the next starts).
+   Each line runs once per combination of the variables it uses (one cluster finishes before the next starts).
 
 ### Supported command syntax
 
@@ -72,7 +72,7 @@ Each line follows the `argo submit` CLI format:
 ### Variable substitution
 
 - `$region` and `$cluster` (or `$clusterName`, `${clusterName}`) are replaced with the values ticked in the pickers.
-- If you have 2 regions and 3 clusters ticked, each line runs 6 times (once per combination).
+- If you have 2 regions and 3 clusters ticked, a line using both runs 6 times (once per combination), a line using only `$region` runs 2 times, and a line using neither runs once.
 - If no picker values are available (e.g. no `helm-create-*` template with a cluster list), you can hardcode values instead.
 
 ### On-failure behaviour

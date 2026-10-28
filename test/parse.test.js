@@ -69,6 +69,18 @@ test('expandBulk: region x cluster, lines stay together per target', () => {
   assert.equal(items[2].lineNo, 1);
 });
 
+test('expandBulk: lines without $cluster (or $region) do not loop over it', () => {
+  const text = `--from workflowtemplate/ecr -p region=$region -p dryRun=false
+--from workflowtemplate/a -p region=$region -p clusterName=$cluster
+--from workflowtemplate/once -p dryRun=false`;
+  const items = expandBulk(text, { regions: ['r1', 'r2'], clusters: ['c1', 'c2'] });
+  assert.deepEqual(items.map(i => [i.template, i.region, i.cluster]), [
+    ['ecr', 'r1', null], ['a', 'r1', 'c1'], ['once', null, null], ['a', 'r1', 'c2'],
+    ['ecr', 'r2', null], ['a', 'r2', 'c1'], ['a', 'r2', 'c2'],
+  ]);
+  assert.ok(items.every(i => i.errors.length === 0));
+});
+
 test('expandBulk: $cluster is not a prefix match of $clusterName, nor of $clusterNameX', () => {
   const [ok] = expandBulk('--from workflowtemplate/a -p x=$clusterName', { clusters: ['c1'] });
   assert.equal(ok.params[0].value, 'c1');

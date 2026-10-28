@@ -98,9 +98,8 @@
     return { template, params, unresolved };
   }
 
-  // -> [{ lineNo, raw, template, params, errors[] }]
-  function parseBulk(text) {
-    // Join `\`-continued lines, remembering the line number each logical line starts on.
+  // Joins `\`-continued lines -> [{ lineNo, text }], lineNo being the line each logical line starts on.
+  function logicalLines(text) {
     const logical = [];
     let pending = null;
     text.split(/\r?\n/).forEach((raw, idx) => {
@@ -110,7 +109,11 @@
       else { pending = null; logical.push({ lineNo: start, text: joined }); }
     });
     if (pending) logical.push(pending);
+    return logical;
+  }
 
+  // -> [{ lineNo, raw, template, params, errors[] }]
+  function parseLogical(logical) {
     const items = [];
     logical.forEach(({ lineNo, text: raw }) => {
       const trimmed = raw.trim();
@@ -131,6 +134,8 @@
     return items;
   }
 
+  const parseBulk = text => parseLogical(logicalLines(text));
+
   // $region / ${region} and $cluster / $clusterName (and braced forms) are filled from the pickers.
   const PICKER_VAR = /\$\{(region|cluster|clusterName)\}|\$(clusterName|cluster|region)(?![A-Za-z0-9_])/g;
 
@@ -148,22 +153,33 @@
   const sortRegions = regions => matchingFirst(regions, /east/);
   const sortClusters = clusters => matchingFirst(clusters, /orch/);
 
-  // Expands the text once per selected region x cluster (only for the variables the text actually uses,
-  // so unrelated selections don't multiply the batch). Order: for each region, for each cluster, all
-  // lines - so the lines for one target stay together and run before the next target starts.
+  // Expands the text once per selected region x cluster, but each line only loops over the variables it
+  // actually uses: a line with just $region runs once per region, one with neither runs once in total.
+  // Order: for each region, for each cluster, the lines due for that target - so the lines for one target
+  // stay together and run before the next target starts (a line that is not per-cluster runs with the
+  // first cluster of each region).
   // A used variable with nothing selected is left in place and reported as unresolved by parseBulk.
   function expandBulk(text, { regions = [], clusters = [] } = {}) {
-    const used = usedPickerVars(text);
-    const rs = used.has('region') && regions.length ? regions : [null];
-    const cs = used.has('cluster') && clusters.length ? clusters : [null];
+    const lines = logicalLines(text).map(line => ({ line, used: usedPickerVars(line.text) }));
+    const anyUsed = new Set(lines.flatMap(({ used }) => [...used]));
+    const rs = anyUsed.has('region') && regions.length ? regions : [null];
+    const cs = anyUsed.has('cluster') && clusters.length ? clusters : [null];
+    const done = new Set();
     const items = [];
     for (const region of rs) {
       for (const cluster of cs) {
-        const filled = text.replace(PICKER_VAR, (whole, braced, bare) => {
-          const v = (braced || bare) === 'region' ? region : cluster;
-          return v ?? whole;
-        });
-        for (const item of parseBulk(filled)) items.push({ ...item, region, cluster });
+        for (const { line, used } of lines) {
+          const r = used.has('region') ? region : null;
+          const c = used.has('cluster') ? cluster : null;
+          const key = `${line.lineNo}\0${r}\0${c}`;
+          if (done.has(key)) continue;
+          done.add(key);
+          const filled = line.text.replace(PICKER_VAR, (whole, braced, bare) => {
+            const v = (braced || bare) === 'region' ? r : c;
+            return v ?? whole;
+          });
+          for (const item of parseLogical([{ lineNo: line.lineNo, text: filled }])) items.push({ ...item, region: r, cluster: c });
+        }
       }
     }
     return items;
