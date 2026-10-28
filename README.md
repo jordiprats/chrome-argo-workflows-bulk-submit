@@ -1,4 +1,4 @@
-# Argo Submit — Bulk Workflow Submission
+# Argo Workflows — Bulk Submission
 
 A Chrome extension that adds a **bulk submit** button to the Argo Workflows web UI. Type a list of `--from workflowtemplate/…` commands, pick regions/clusters, and submit them one after another — all from the browser, no CLI needed.
 
