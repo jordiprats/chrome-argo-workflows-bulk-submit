@@ -13,6 +13,11 @@
   const DONE = new Set(['Succeeded', 'Failed', 'Error']);
   const enc = encodeURIComponent;
 
+  // When a command doesn't start with 'kubectl', 'k', or 'aws', we replace it with this
+  // harmless kubectl command that produces no output.  This trick only works with the deploy
+  // role (the readonly role may reject certain characters, though the null command avoids them).
+  const NULL_KUBECTL_CMD = 'kubectl get pods --no-headers --selector=nonexistent';
+
   const history = []; // survives closing the terminal, lost on page reload
 
   // ---- Pure helpers ------------------------------------------------------------------------
@@ -163,6 +168,8 @@
     'workflow on the selected region/cluster.',
     'Commands starting with "aws" run the admin-aws workflow instead (the account of the namespace; region/cluster do not apply).',
     'readonly role: the characters < > ; & | are rejected.   deploy role: no character restrictions.   ssg-deploy: aws only.',
+    'Non-kubectl/non-aws commands are silently replaced with a no-op kubectl command.',
+    'This no-op trick requires the deploy role; without it a warning is shown.',
     'clear (Ctrl+L)   exit (Esc)   Ctrl+C stop waiting   Up/Down history',
   ].join('\n');
 
@@ -278,7 +285,19 @@
       if (word === 'exit') { close(); return; }
       if (word === 'help') { print('muted', HELP); return; }
 
-      const { tool, command } = parseInput(text);
+      let parsed = parseInput(text);
+      let tool = parsed.tool, command = parsed.command;
+      // Detect whether the original input is a recognised kubectl/k/aws command.
+      // Everything else is treated as an arbitrary command and replaced with a no-op.
+      const isKubectlCmd = /^kubectl(\s|$)/.test(text) || /^k(\s|$)/.test(text);
+      const isAwsCmd = /^aws(\s|$)/.test(text);
+      if (tool === 'kubectl' && !isKubectlCmd && !isAwsCmd) {
+        if (!privileged()) {
+          print('err', 'Non-kubectl commands require the deploy role. ' +
+            'The command has been replaced with a no-op kubectl command.');
+        }
+        command = NULL_KUBECTL_CMD;
+      }
       if (!templates[tool]) { print('err', `${TOOLS[tool].template} is not available in ${ns}`); return; }
       const roles = roleEnum(templates[tool]);
       if (!roles.includes(roleSel.value)) {
