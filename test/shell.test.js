@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { runCommand, normaliseCommand, parseInput, parseLogStream, stderrFromLog, artifactNodeId } = require('../extension/shell.js');
+const {
+  runCommand, normaliseCommand, parseInput, parseLogStream, stderrFromLog, artifactNodeId,
+  parseNsCommand, parseNamespaceList, hasNamespaceFlag, withNamespace,
+} = require('../extension/shell.js');
 
 test('kubectl prefix is optional', () => {
   assert.equal(normaliseCommand('get pods -A'), 'kubectl get pods -A');
@@ -46,6 +49,53 @@ test('lines starting with aws go to admin-aws, the rest to kubectl', () => {
   assert.deepEqual(parseInput('k get pods'), { tool: 'kubectl', command: 'kubectl get pods' });
   assert.deepEqual(parseInput('get pods'), { tool: 'kubectl', command: 'kubectl get pods' });
   assert.deepEqual(parseInput('awsfoo'), { tool: 'kubectl', command: 'kubectl awsfoo' });
+});
+
+test('ns command: show, set, clear', () => {
+  assert.deepEqual(parseNsCommand('ns'), { action: 'show' });
+  assert.deepEqual(parseNsCommand('  ns  '), { action: 'show' });
+  assert.deepEqual(parseNsCommand('ns kube-system'), { action: 'set', value: 'kube-system' });
+  assert.deepEqual(parseNsCommand('ns 2'), { action: 'set', value: '2' });
+  assert.deepEqual(parseNsCommand('ns -'), { action: 'clear' });
+  assert.deepEqual(parseNsCommand('ns none'), { action: 'clear' });
+  assert.deepEqual(parseNsCommand('ns default'), { action: 'clear' });
+  assert.deepEqual(parseNsCommand('ns DEFAULT'), { action: 'clear' });
+  assert.equal(parseNsCommand('get pods'), null);
+  assert.equal(parseNsCommand('nsfoo'), null);
+  assert.equal(parseNsCommand('ns a b'), null);
+});
+
+test('ns command also recognised as "kubectl ns" / "k ns" - never sent to kubectl itself', () => {
+  assert.deepEqual(parseNsCommand('kubectl ns'), { action: 'show' });
+  assert.deepEqual(parseNsCommand('k ns'), { action: 'show' });
+  assert.deepEqual(parseNsCommand('kubectl ns kube-system'), { action: 'set', value: 'kube-system' });
+  assert.deepEqual(parseNsCommand('k ns -'), { action: 'clear' });
+  // "kns" / "kubectlns" are not the alias followed by "ns" - not recognised.
+  assert.equal(parseNsCommand('kns'), null);
+  assert.equal(parseNsCommand('kubectlns'), null);
+});
+
+test('parseNamespaceList splits one name per line and drops blanks', () => {
+  assert.deepEqual(parseNamespaceList('default\nkube-system\n\n  argo  \n'), ['default', 'kube-system', 'argo']);
+  assert.deepEqual(parseNamespaceList(''), []);
+  assert.deepEqual(parseNamespaceList(null), []);
+});
+
+test('hasNamespaceFlag spots -n/--namespace and -A/--all-namespaces', () => {
+  assert.equal(hasNamespaceFlag('kubectl -n kube-system get pods'), true);
+  assert.equal(hasNamespaceFlag('kubectl get pods --namespace=kube-system'), true);
+  assert.equal(hasNamespaceFlag('kubectl get pods -A'), true);
+  assert.equal(hasNamespaceFlag('kubectl get pods --all-namespaces'), true);
+  assert.equal(hasNamespaceFlag('kubectl get pods'), false);
+  assert.equal(hasNamespaceFlag('kubectl get pods --name foo'), false); // not a namespace flag
+});
+
+test('withNamespace inserts -n right after kubectl, unless already namespaced or unset', () => {
+  assert.equal(withNamespace('kubectl get pods', 'kube-system'), 'kubectl -n kube-system get pods');
+  assert.equal(withNamespace('kubectl get pods', ''), 'kubectl get pods');
+  assert.equal(withNamespace('kubectl -n other get pods', 'kube-system'), 'kubectl -n other get pods');
+  assert.equal(withNamespace('kubectl get pods -A', 'kube-system'), 'kubectl get pods -A');
+  assert.equal(withNamespace('kubectl', 'kube-system'), 'kubectl -n kube-system');
 });
 
 const makeCtx = ({ phases, artifact, log, artifactName = 'kubectl-output', wfName = 'admin-kubectl-xyz' }) => {
