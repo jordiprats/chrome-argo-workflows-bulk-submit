@@ -411,29 +411,60 @@
 
   // ---- Button injection --------------------------------------------------------------------
 
-  function inject() {
-    const orig = [...document.querySelectorAll('button, a')]
-      .find(el => !el.closest('[data-argo-bulk-root]') && el.textContent.trim() === BUTTON_TEXT);
-    if (!orig) return;
-    const existing = document.querySelector('[data-argo-bulk]');
-    if (existing && existing.previousElementSibling === orig) return;
-    existing?.remove(); // React re-rendered the original; ours is stale
+  // ---- kubectl shell (shell.js) -------------------------------------------------------------
 
-    // Clone so the button picks up exactly the toolbar's styling. React listeners live on the root
-    // and are not copied by cloneNode, so the clone is inert until we attach our own.
+  let shell = null;
+
+  function openShell() {
+    if (shell || !globalThis.ArgoShell) return;
+    shell = globalThis.ArgoShell.openShell({
+      api, basePath, currentNamespace, h, sleep, targetsFromTemplates, onClose: () => { shell = null; },
+    });
+  }
+
+  // Clone `orig` so the button picks up exactly the toolbar's styling. React listeners live on the root
+  // and are not copied by cloneNode, so the clone is inert until we attach our own.
+  function cloneButton(orig, { attr, label, icon, title, onClick }) {
     const btn = orig.cloneNode(true);
     btn.removeAttribute('id');
-    btn.setAttribute('data-argo-bulk', '');
-    btn.setAttribute('title', 'Submit several workflow templates in sequence');
+    btn.setAttribute(attr, '');
+    btn.setAttribute('title', title);
     if (btn.tagName === 'A') btn.setAttribute('href', '#');
     else btn.setAttribute('type', 'button');
     const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT);
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      if (n.nodeValue.includes(BUTTON_TEXT)) n.nodeValue = n.nodeValue.replace(BUTTON_TEXT, 'Submit Bulk');
+      if (n.nodeValue.includes(BUTTON_TEXT)) n.nodeValue = n.nodeValue.replace(BUTTON_TEXT, label);
     }
-    btn.querySelectorAll('.fa-plus').forEach(i => { i.classList.remove('fa-plus'); i.classList.add('fa-list'); });
-    btn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openModal(); });
-    orig.after(btn);
+    btn.querySelectorAll('.fa-plus').forEach(i => { i.classList.remove('fa-plus'); i.classList.add(icon); });
+    btn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); onClick(); });
+    return btn;
+  }
+
+  // Keeps `<orig> <bulk> <shell>` next to each other, re-adding whatever React's re-render dropped.
+  function inject() {
+    const orig = [...document.querySelectorAll('button, a')]
+      .find(el => !el.closest('[data-argo-bulk-root]') && el.textContent.trim() === BUTTON_TEXT);
+    if (!orig) return;
+
+    const place = (after, spec) => {
+      const existing = document.querySelector(`[${spec.attr}]`);
+      if (existing && existing.previousElementSibling === after) return existing;
+      existing?.remove(); // stale
+      const btn = cloneButton(orig, spec);
+      after.after(btn);
+      return btn;
+    };
+
+    const bulk = place(orig, {
+      attr: 'data-argo-bulk', label: 'Submit Bulk', icon: 'fa-list',
+      title: 'Submit several workflow templates in sequence', onClick: openModal,
+    });
+    if (globalThis.ArgoShell) {
+      place(bulk, {
+        attr: 'data-argo-shell', label: 'Shell', icon: 'fa-terminal',
+        title: 'Run kubectl commands through the admin-kubectl workflow', onClick: openShell,
+      });
+    }
   }
 
   let scheduled = false;

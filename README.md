@@ -82,6 +82,21 @@ Each line follows the `argo submit` CLI format:
 
 ---
 
+## Shell (kubectl and aws)
+
+Next to **Submit Bulk** there is a **Shell** button: a terminal-style window that runs commands through workflow templates. Lines starting with `aws` run the `admin-aws` template (from `pi-wf-account-provisioning-aws`); anything else is kubectl and runs `admin-kubectl` (from `pi-wf-kubernetes-aws`).
+
+- Pick the region, cluster and role in the title bar (choices come from the templates' parameter enums; the role list is the union of both, and a role a template doesn't offer, like `ssg-deploy` for kubectl, is refused up front), type a command and press Enter. The leading `kubectl` is optional (`get pods -A` works) and `k` is an alias for it (`k get pods` is sent to the workflow as `kubectl get pods`).
+- `aws` commands run in the account's own `admin-aws` workflow: region and cluster do not apply to them. `readonly` needs a command like `aws s3 ls` with none of `< > ; & |`; `deploy` has no restriction.
+- While the workflow runs you only see a spinner with its state (submitting, pending, running). Then the `kubectl-output` / `aws-output` artifact is printed. If the command fails, the stderr from the pod log is printed instead, with a link to the workflow.
+- `readonly` role rejects the characters `< > ; & |`. `deploy` removes that restriction and is red-prompted; it needs the `admins` group like the template itself.
+- `Up`/`Down` history, `Ctrl+L` or `clear` to clear, `Ctrl+C` to stop waiting (the workflow keeps running), `Esc` to close.
+- The button is always shown; if the namespace lacks one of the templates, the terminal says so and the other still works.
+
+Every command is a real workflow in the namespace, so it shows up in the workflow list and takes as long as a pod start (typically several seconds).
+
+---
+
 ## Optional: Token sync for the `argo` CLI
 
 The extension can also read your Argo SSO session cookie and pass it to the `argo` CLI, so you can run `argo` from your terminal without re-authenticating.
@@ -110,7 +125,8 @@ The extension can also read your Argo SSO session cookie and pass it to the `arg
 | `background.js` | Service worker: cookie sync, bulk script registration |
 | `lib.js` | Shared library: cookie reading, settings, native messaging, bulk script helpers |
 | `parse.js` | Parser for `argo submit`-style command lines (also usable in Node) |
-| `bulk.js` | Content script: injects "Submit Bulk" modal |
+| `bulk.js` | Content script: injects the "Submit Bulk" and "Shell" buttons and the bulk modal |
+| `shell.js` | kubectl/aws terminal (runs `admin-kubectl` / `admin-aws`, prints the output); also usable in Node |
 | `popup.html` / `popup.js` | Toolbar popup UI for token actions |
 | `popup-bulk.js` | Popup logic for enabling/disabling bulk per site |
 | `options.html` / `options.js` | Settings page for host configuration |

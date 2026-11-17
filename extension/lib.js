@@ -57,7 +57,7 @@ export function pushToHost(host, token) {
 // Registered for every site the user has granted (the popup only asks for the permission; the
 // background worker does the registering, because the popup is closed by Chrome's permission prompt).
 
-const BULK_FILES = ['parse.js', 'bulk.js'];
+const BULK_FILES = ['parse.js', 'shell.js', 'bulk.js'];
 const BULK_PREFIX = 'bulk:';
 const bulkPattern = origin => `${origin}/*`;
 
@@ -76,11 +76,17 @@ export async function bulkEnabled(origin) {
 // Make the registered scripts match the granted sites, and inject into tabs already open on a new site.
 export async function syncBulk() {
   const granted = new Set(concreteOrigins((await chrome.permissions.getAll()).origins));
-  const registered = new Set((await chrome.scripting.getRegisteredContentScripts())
-    .filter(s => s.id.startsWith(BULK_PREFIX)).map(s => s.id.slice(BULK_PREFIX.length)));
+  const existing = (await chrome.scripting.getRegisteredContentScripts()).filter(s => s.id.startsWith(BULK_PREFIX));
+  const registered = new Set(existing.map(s => s.id.slice(BULK_PREFIX.length)));
 
   const stale = [...registered].filter(o => !granted.has(o));
   if (stale.length) await chrome.scripting.unregisterContentScripts({ ids: stale.map(o => BULK_PREFIX + o) });
+
+  // Registrations persist across extension updates, so pick up a changed file list (e.g. a new script).
+  const outdated = existing.filter(s => granted.has(s.id.slice(BULK_PREFIX.length)) && s.js?.join() !== BULK_FILES.join());
+  if (outdated.length) {
+    await chrome.scripting.updateContentScripts(outdated.map(s => ({ id: s.id, js: BULK_FILES })));
+  }
 
   for (const origin of [...granted].filter(o => !registered.has(o))) {
     try {
