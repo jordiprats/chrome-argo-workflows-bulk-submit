@@ -57,11 +57,70 @@
     return NS_FLAG.test(command) || ALL_NS_FLAG.test(command);
   }
 
-  // Inserts "-n <ns>" right after "kubectl" so every command picks up the default namespace, unless the
-  // command already names one (or -A/--all-namespaces) or no default namespace is set.
+  // Same length as `s`, with everything inside quotes (and backslash-escaped characters) replaced by "_", so
+  // the structure of a shell line can be scanned without tripping over "|", ";" or "kubectl" in a -p '{...}' payload.
+  // The quote characters themselves are kept. An unterminated quote masks the rest of the line.
+  function maskQuoted(s) {
+    let out = '';
+    let quote = '';
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (quote) {
+        if (c === quote) { quote = ''; out += c; }
+        else if (c === '\\' && quote === '"' && i + 1 < s.length) { out += '__'; i++; }
+        else out += '_';
+      } else if (c === '\\' && i + 1 < s.length) { out += '__'; i++; }
+      else if (c === '"' || c === "'") { quote = c; out += c; }
+      else out += c;
+    }
+    return out;
+  }
+
+  // Programs that run the rest of their command line, so a `kubectl` after them (xargs -I{} kubectl ...) is a
+  // real kubectl invocation too.
+  const WRAPPERS = new Set(['xargs', 'watch', 'time', 'sudo', 'env', 'nohup', 'command', 'exec', 'timeout', 'nice']);
+
+  // End offsets (in `command`) of every `kubectl` invocation that isn't already namespaced, in order. A line is split
+  // into simple commands at unquoted | ; & ( ) ` and newlines; in each one `kubectl` counts when it is the command
+  // word (after any VAR=value prefixes), or the first such word after a wrapper like xargs. Each invocation is
+  // judged on its own arguments, so `-n`/-A on one doesn't stop the others getting the default.
+  function kubectlInsertPoints(command) {
+    const masked = maskQuoted(command);
+    const points = [];
+    let start = 0;
+    for (let i = 0; i <= masked.length; i++) {
+      if (i < masked.length && !'|;&()`\n'.includes(masked[i])) continue;
+      // "2>&1", "&>file" and ">&2" are redirections, not command separators
+      if (masked[i] === '&' && (/[<>]/.test(masked[i - 1] || '') || masked[i + 1] === '>')) continue;
+      const words = [...masked.slice(start, i).matchAll(/\S+/g)].map(m => ({ w: m[0], end: start + m.index + m[0].length }));
+      start = i + 1;
+      let first = 0;
+      while (first < words.length && /^\w+=/.test(words[first].w)) first++; // FOO=bar kubectl ...
+      if (first >= words.length) continue;
+      let at = -1;
+      if (words[first].w === 'kubectl') at = first;
+      else if (WRAPPERS.has(words[first].w)) {
+        // skip the wrapper's own options and their values (-I{}, -I {}, -n 1, 5s, FOO=bar); the next word is
+        // the program it runs, and only counts if that is kubectl (so `xargs echo kubectl` is left alone)
+        let j = first + 1;
+        while (j < words.length && /^(-|\{\}$|\d+[smhd]?$|\w+=)/.test(words[j].w)) j++;
+        if (j < words.length && words[j].w === 'kubectl') at = j;
+      }
+      if (at < 0) continue;
+      const segEnd = i;
+      if (!hasNamespaceFlag(masked.slice(words[at].end, segEnd))) points.push(words[at].end);
+    }
+    return points;
+  }
+
+  // Inserts "-n <ns>" right after every "kubectl" in the line - including the ones after a pipe, `&&`, `;`, `$(`
+  // or `xargs` - so each picks up the default namespace. A kubectl that already names one (or -A/--all-namespaces),
+  // or any kubectl when no default namespace is set, is left alone. Text inside quotes is never touched.
   function withNamespace(command, ns) {
-    if (!ns || hasNamespaceFlag(command) || !/^kubectl(\s|$)/.test(command)) return command;
-    return command.replace(/^kubectl/, `kubectl -n ${ns}`);
+    if (!ns) return command;
+    let out = command;
+    for (const at of kubectlInsertPoints(command).reverse()) out = `${out.slice(0, at)} -n ${ns}${out.slice(at)}`;
+    return out;
   }
 
   // The log endpoint streams one JSON object per line: {"result":{"content":"...","podName":"..."}}.
@@ -102,6 +161,22 @@
   function parseInput(text) {
     const t = (text || '').trim();
     return /^aws(\s|$)/.test(t) ? { tool: 'aws', command: t } : { tool: 'kubectl', command: normaliseCommand(t) };
+  }
+
+  // Word movement for the command line, readline-style: words are runs of non-whitespace, so "-n" and
+  // "a/b" are each one word. Left goes to the start of the word before the cursor, right to the end of the next one.
+  function wordLeft(text, pos) {
+    let i = Math.min(pos, text.length);
+    while (i > 0 && /\s/.test(text[i - 1])) i--;
+    while (i > 0 && !/\s/.test(text[i - 1])) i--;
+    return i;
+  }
+
+  function wordRight(text, pos) {
+    let i = Math.max(pos, 0);
+    while (i < text.length && /\s/.test(text[i])) i++;
+    while (i < text.length && !/\s/.test(text[i])) i++;
+    return i;
   }
 
   // ---- Running a command -------------------------------------------------------------------
@@ -213,13 +288,18 @@
     'ns <name>      set the default namespace added to kubectl commands: "get pods" then runs as',
     '               "kubectl -n <name> get pods". "ns <number>" picks by number from the last "ns" listing.',
     'ns -           clear it (also "ns none" / "ns default").',
-    '               a command that already has -n/--namespace or -A/--all-namespaces is left alone.',
+    '               it is added to every kubectl in the line (after |, &&, ;, $( ) or xargs), each judged on its own:',
+    '               a kubectl that already has -n/--namespace or -A/--all-namespaces is left alone. Quoted text is never touched.',
     '               "ns" also works as "kubectl ns" / "k ns" - it is never sent to kubectl itself.',
     'Typing and pressing Enter while a command is running queues the next one; it starts once the current',
     'one (and anything queued before it) finishes - nothing is submitted early. Ctrl+C also drops the queue.',
     'Queued (not yet running) commands can be edited in place, reordered, bumped to the front, or removed',
     'before their turn comes, using the controls shown next to each one.',
-    'clear (Ctrl+L)   exit (Esc)   Ctrl+C stop waiting   Up/Down history',
+    'Ctrl+D         send the running command to the background: the prompt (and the queue) moves on, and its output',
+    '               is printed under a "[n] done" line when it finishes. "jobs" lists them; closing the shell stops waiting.',
+    'Ctrl+Left/Right, Alt(Option)+Left/Right or Alt+B/F move the cursor word by word. (macOS keeps Ctrl+Arrows for itself',
+    '               unless the Mission Control shortcuts are off - use Option+Arrows there.)',
+    'clear (Ctrl+L)   exit (Esc)   Ctrl+C stop waiting (or clear the line when nothing is running)   Up/Down history',
   ].join('\n');
 
   const remember = (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } };
@@ -256,11 +336,13 @@
     const input = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', 'aria-label': 'command' });
     const queueEl = h('div', { class: 'queue' });
     const nsBadge = h('span', { class: 'muted', title: 'default k8s namespace added to kubectl commands - set with "ns <name>", cleared with "ns -"' });
+    const copiedBadge = h('span', { class: 'muted', title: 'selecting text in the output copies it automatically' });
+    const jobsBadge = h('span', { class: 'muted', title: 'commands running in the background (Ctrl+D) - type "jobs" to list them' });
 
     root.append(h('style', {}, CSS), h('div', { class: 'backdrop' },
       h('div', { class: 'term', role: 'dialog', 'aria-label': 'shell' },
-        h('div', { class: 'bar' }, h('strong', {}, 'shell'), h('span', {}, ns || ''), nsBadge,
-          h('span', { class: 'spacer' }), regionSel, clusterSel, roleSel, closeBtn),
+        h('div', { class: 'bar' }, h('strong', {}, 'shell'), h('span', {}, ns || ''), nsBadge, jobsBadge,
+          h('span', { class: 'spacer' }), copiedBadge, regionSel, clusterSel, roleSel, closeBtn),
         screen,
         h('div', { class: 'inputwrap' }, queueEl, h('div', { class: 'inputrow' }, promptEl, input)))));
     document.body.append(host);
@@ -299,6 +381,12 @@
 
     const echoLine = text => screen.append(h('div', {}, h('span', { class: `prompt ${roleClass()}` }, promptText()), text));
     let lastNamespaces = []; // from the most recent "ns" listing, so "ns 2" can pick by number
+    let jobSeq = 0;
+    let foregroundJob = null; // the command the queue is currently waiting on (Ctrl+D detaches it)
+    const backgroundJobs = new Map(); // id -> job, detached with Ctrl+D and still being waited on
+    function refreshJobsBadge() {
+      jobsBadge.textContent = backgroundJobs.size ? `bg: ${backgroundJobs.size}` : '';
+    }
 
     // Local commands never touch the workflow, so they can run synchronously; everything else goes
     // through runWorkflowCommand (ns is handled separately in runQueue - see parseNsCommand). Returns
@@ -306,10 +394,13 @@
     function runLocal(text) {
       const word = text.split(/\s+/)[0];
       if (word === 'clear') { screen.replaceChildren(); return true; }
-      if (!['exit', 'help'].includes(word)) return false;
+      if (!['exit', 'help', 'jobs'].includes(word)) return false;
       echoLine(text);
       if (word === 'exit') close();
-      else print('muted', HELP);
+      else if (word === 'jobs') {
+        if (!backgroundJobs.size) print('muted', 'no background jobs');
+        for (const j of backgroundJobs.values()) print('muted', `[${j.id}] ${j.phase}  ${j.text}${j.workflow ? `  (${j.workflow})` : ''}`);
+      } else print('muted', HELP);
       return true;
     }
 
@@ -433,36 +524,60 @@
         : { clusterName: clusterSel.value, role: roleSel.value, command, dryRun: 'false' };
       if (tool === 'kubectl' && regionSel.value) params.region = regionSel.value;
 
-      let phase = 'submitting';
-      let workflow = '';
+      const job = { id: 0, text, phase: 'submitting', workflow: '', detached: false, abort: new AbortController() };
       const status = print('muted', '');
       let frame = 0;
-      const spin = setInterval(() => { status.textContent = `${SPINNER[frame++ % SPINNER.length]} ${phase}...`; }, 100);
-      abort = new AbortController();
+      const spin = setInterval(() => { status.textContent = `${SPINNER[frame++ % SPINNER.length]} ${job.phase}...`; }, 100);
+      abort = job.abort;
       setBusy(true);
-      try {
-        const r = await runCommand(ctx, {
-          ns, tool, params, signal: abort.signal, onPhase: p => { phase = p; }, onSubmitted: n => { workflow = n; },
-        });
-        status.remove();
-        if (opts.render) {
-          opts.render(r);
-        } else {
-          if (r.output.trim()) print('out', r.output.replace(/\n+$/, ''));
-          if (r.errors) print('err', r.errors);
-          if (!r.ok) {
-            if (!r.errors) print('err', r.message || 'command failed');
-            print('muted', h('a', { href: `${basePath()}workflows/${enc(ns)}/${enc(r.name)}`, target: '_blank', rel: 'noreferrer' }, r.name));
-          }
-        }
-      } catch (e) {
-        status.remove();
-        if (e.name === 'AbortError') print('muted', `^C${workflow ? ` (workflow ${workflow} keeps running)` : ''}`);
-        else print('err', e.message);
-      } finally {
+
+      // Ctrl+D: stop waiting in the foreground but keep polling this workflow, so the queue moves on and
+      // the output is printed (under a "[n] done" header) whenever it finishes.
+      let release;
+      const detached = new Promise(r => { release = r; });
+      job.detach = () => {
+        job.detached = true;
+        job.id = ++jobSeq;
+        backgroundJobs.set(job.id, job);
         clearInterval(spin);
-        abort = null;
-      }
+        status.textContent = `[${job.id}] ${text}  -> background${job.workflow ? ` (workflow ${job.workflow})` : ''}`;
+        if (abort === job.abort) abort = null;
+        refreshJobsBadge();
+        release();
+      };
+      foregroundJob = job;
+
+      const work = (async () => {
+        try {
+          const r = await runCommand(ctx, {
+            ns, tool, params, signal: job.abort.signal,
+            onPhase: p => { job.phase = p; }, onSubmitted: n => { job.workflow = n; },
+          });
+          if (!job.detached) status.remove();
+          else print('muted', `[${job.id}] ${r.ok ? 'done' : 'failed'}: ${text}`);
+          if (opts.render) {
+            opts.render(r);
+          } else {
+            if (r.output.trim()) print('out', r.output.replace(/\n+$/, ''));
+            if (r.errors) print('err', r.errors);
+            if (!r.ok) {
+              if (!r.errors) print('err', r.message || 'command failed');
+              print('muted', h('a', { href: `${basePath()}workflows/${enc(ns)}/${enc(r.name)}`, target: '_blank', rel: 'noreferrer' }, r.name));
+            }
+          }
+        } catch (e) {
+          if (!job.detached) status.remove();
+          const tag = job.detached ? `[${job.id}] ` : '';
+          if (e.name === 'AbortError') print('muted', `${tag}^C${job.workflow ? ` (workflow ${job.workflow} keeps running)` : ''}`);
+          else print('err', `${tag}${e.message}`);
+        } finally {
+          clearInterval(spin);
+          if (abort === job.abort) abort = null;
+          if (foregroundJob === job) foregroundJob = null;
+          if (job.detached) { backgroundJobs.delete(job.id); refreshJobsBadge(); }
+        }
+      })();
+      await Promise.race([work, detached]);
     }
 
     // Drains the queue strictly in order - a command only starts once everything typed before it has
@@ -520,6 +635,7 @@
 
     function close() {
       abort?.abort();
+      for (const j of backgroundJobs.values()) j.abort.abort(); // stops waiting only; the workflows keep running
       queue.length = 0;
       window.removeEventListener('resize', fit);
       host.remove();
@@ -540,6 +656,15 @@
         queue.push(text);
         renderQueue();
         if (!wasRunning) { setBusy(true); runQueue(); }
+      } else if (!e.shiftKey && !e.metaKey && (
+        ((e.ctrlKey || e.altKey) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) ||
+        (e.altKey && !e.ctrlKey && (e.key === 'b' || e.key === 'f')))) {
+        // Word-by-word cursor movement like a shell: Ctrl/Alt(Option)+Left/Right, or Alt+B / Alt+F.
+        // Shift is left to the browser, which extends the selection word by word natively.
+        e.preventDefault();
+        const back = e.key === 'ArrowLeft' || e.key === 'b';
+        const pos = (back ? wordLeft : wordRight)(input.value, back ? input.selectionStart : input.selectionEnd);
+        input.setSelectionRange(pos, pos);
       } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
         histPos = Math.max(0, Math.min(history.length, histPos + (e.key === 'ArrowUp' ? -1 : 1)));
@@ -549,14 +674,58 @@
     host.addEventListener('keydown', e => {
       if (e.key === 'Escape') close();
       else if (e.ctrlKey && e.key === 'l') { e.preventDefault(); screen.replaceChildren(); }
-      else if (e.ctrlKey && e.key === 'c' && abort && !selectedText()) {
+      else if (e.ctrlKey && e.key === 'd') {
+        // Like a shell's Ctrl+Z/bg: keep the running command going, hand the prompt back, and print its output when done.
+        e.preventDefault();
+        if (foregroundJob && !foregroundJob.detached) {
+          foregroundJob.detach();
+          input.focus();
+        } else print('muted', 'nothing running to send to the background');
+      } else if (e.ctrlKey && e.key === 'c' && abort && !selectedText()) {
         e.preventDefault();
         if (queue.length) { print('muted', `(dropped ${queue.length} queued command(s))`); queue.length = 0; renderQueue(); }
         abort.abort();
+      } else if (e.ctrlKey && e.key === 'c' && !abort && !selectedText() && input.selectionStart === input.selectionEnd) {
+        // Nothing running: like a shell prompt, Ctrl+C abandons the line being typed (a selection still copies).
+        e.preventDefault();
+        if (input.value) echoLine(`${input.value}^C`);
+        input.value = '';
+        histPos = history.length;
+        scroll();
       }
       e.stopPropagation(); // keep Argo's own keyboard shortcuts out of it
     });
     screen.addEventListener('click', () => { if (!selectedText()) input.focus(); });
+
+    // Copy-on-select, like most terminals: releasing the mouse over a selection copies it and puts the
+    // cursor back in the command input, so a paste (Cmd/Ctrl+V) works right away with no clicking around.
+    // Selecting in the output steals focus from the input, which is what made copy/paste awkward before.
+    async function copyText(text) {
+      try { await navigator.clipboard.writeText(text); return true; } catch { /* not allowed here: fall back */ }
+      try { return document.execCommand('copy'); } catch { return false; }
+    }
+    root.querySelector('.backdrop').addEventListener('mouseup', e => {
+      if (['INPUT', 'SELECT', 'BUTTON'].includes(e.composedPath()[0]?.tagName)) return; // editing a text box, not selecting output
+      setTimeout(async () => { // let the browser finalise the selection first
+        const text = selectedText().replace(/\s+$/, '');
+        if (!text) return;
+        if (await copyText(text)) {
+          copiedBadge.textContent = 'copied';
+          setTimeout(() => { copiedBadge.textContent = ''; }, 1200);
+          input.focus({ preventScroll: true });
+        }
+      }, 0);
+    });
+    // A paste that lands anywhere other than a text box (focus was left on the output) still goes to the command line.
+    host.addEventListener('paste', e => {
+      const t = e.composedPath()[0];
+      if (t && t.tagName === 'INPUT') return;
+      const text = e.clipboardData?.getData('text');
+      if (!text) return;
+      e.preventDefault();
+      input.focus();
+      input.setRangeText(text.replace(/\s*\n\s*/g, ' '), input.selectionStart, input.selectionEnd, 'end');
+    });
     // Clicking outside the terminal is easy to do by accident, so ask first (Esc and Close still close directly).
     root.querySelector('.backdrop').addEventListener('mousedown', e => {
       if (e.target !== e.currentTarget) return;
@@ -578,7 +747,7 @@
 
   const api = {
     openShell, runCommand, normaliseCommand, parseInput, parseLogStream, stderrFromLog, artifactNodeId,
-    parseNsCommand, parseNamespaceList, hasNamespaceFlag, withNamespace,
+    parseNsCommand, parseNamespaceList, hasNamespaceFlag, withNamespace, wordLeft, wordRight,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ArgoShell = api;

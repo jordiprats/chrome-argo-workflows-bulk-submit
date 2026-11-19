@@ -33,7 +33,7 @@ if (!host) {
       };
       $('write').onclick = async () => {
         try {
-          const r = await pushToHost(host, t.token);
+          const r = await pushToHost(host, t.token, { expires: t.expires, env: true });
           note(r?.ok ? `Wrote ${r.path}` : `Host error: ${r?.error ?? 'no response'}`);
         } catch (e) {
           note(`Native host not reachable: ${e.message}. Run install.sh.`);

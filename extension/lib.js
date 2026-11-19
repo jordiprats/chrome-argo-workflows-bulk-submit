@@ -2,7 +2,16 @@ export const NATIVE_HOST = 'com.jprats.argo_submit';
 export const COOKIE_NAME = 'authorization';
 
 export async function getSettings() {
-  return chrome.storage.sync.get({ host: '', writeFile: true });
+  return chrome.storage.sync.get({ host: '', writeFile: true, syncHosts: [] });
+}
+
+// Hosts whose session token is kept in ~/.cache/argo-sso/tokens/<host>.json (the options host list plus the
+// main host), limited to those the user has granted access to (reading a cookie needs the host permission).
+export async function grantedSyncHosts() {
+  const { host, syncHosts } = await getSettings();
+  const all = [...new Set([host, ...(syncHosts || [])].map(cleanHost).filter(Boolean))];
+  const ok = await Promise.all(all.map(h => chrome.permissions.contains({ origins: [`https://${h}/*`] })));
+  return all.filter((_, i) => ok[i]);
 }
 
 export function cleanHost(input) {
@@ -49,8 +58,9 @@ export function envText(host, token) {
   ].join('\n');
 }
 
-export function pushToHost(host, token) {
-  return chrome.runtime.sendNativeMessage(NATIVE_HOST, { host, token });
+// token null removes the host's token file. env true also writes ~/.cache/argo-sso/env (argo CLI).
+export function pushToHost(host, token, { expires = null, env = false } = {}) {
+  return chrome.runtime.sendNativeMessage(NATIVE_HOST, { host, token, expires, env });
 }
 
 // ---- Bulk submit content script ----

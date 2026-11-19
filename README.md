@@ -91,31 +91,35 @@ Next to **Submit Bulk** there is a **Shell** button: a terminal-style window tha
 - While the workflow runs you only see a spinner with its state (submitting, pending, running). Then the `kubectl-output` / `aws-output` artifact is printed. If the command fails, the stderr from the pod log is printed instead, with a link to the workflow.
 - `readonly` role rejects the characters `< > ; & |`. `deploy` removes that restriction and is red-prompted; it needs the `admins` group like the template itself.
 - You can keep typing while a command runs. Pressing Enter queues the next one instead of submitting it; it only starts once everything queued ahead of it has finished. Queued commands are listed above the input, each in its own editable box, with buttons to move it up/down, jump it to the front, or remove it — all before its turn comes; nothing already running can be edited or stopped that way. `Ctrl+C` drops anything still queued as well as stopping the current wait.
-- `Up`/`Down` history, `Ctrl+L` or `clear` to clear, `Ctrl+C` to stop waiting (the workflow keeps running), `Esc` to close.
+- `Ctrl+D` sends the running command to the background: the prompt and the queue move on straight away, and the command's output is printed under a `[n] done: <command>` line when its workflow finishes (output from later commands may appear in between). The title bar shows `bg: <count>` while any are running and `jobs` lists them. `Ctrl+C` only affects the foreground command and leaves background jobs alone; closing the shell stops waiting for them, but the workflows keep running. Pickers are read when a command is submitted, so changing region/cluster/role afterwards doesn't affect jobs already in the background.
+- Copy and paste work like a terminal: selecting text in the output copies it automatically ("copied" flashes in the title bar) and puts the cursor back in the input, so you can paste straight away. A paste that lands outside the input is redirected to it.
+- `Ctrl+←`/`Ctrl+→`, `Option/Alt+←`/`→` and `Alt+B`/`Alt+F` move the cursor word by word in the command line (add `Shift` to select). On macOS, `Ctrl+←/→` is claimed by Mission Control to switch Spaces, so the page only sees it if you turn those shortcuts off in System Settings → Keyboard → Keyboard Shortcuts → Mission Control; `Option+←/→` always works.
+- `Up`/`Down` history, `Ctrl+L` or `clear` to clear, `Ctrl+C` to stop waiting (the workflow keeps running) — or, when nothing is running, to discard what you've typed (it's echoed with `^C`, like a shell prompt; with text selected it still copies), `Esc` to close.
 - The button is always shown; if the namespace lacks one of the templates, the terminal says so and the other still works.
-- `ns` (also `kubectl ns` / `k ns` — it's never sent to kubectl, which has no such command) lists the cluster's namespaces, numbered, with the current default marked. `ns <name>` sets the default Kubernetes namespace — every kubectl command after that runs as if you'd added `-n <name>`, shown next to the title — and `ns <number>` sets it by picking from the last listing. `ns -` (or `ns none`/`ns default`) clears it. A command that already has `-n`/`--namespace` or `-A`/`--all-namespaces` is left alone. This is a client-side convenience only — it has nothing to do with the Argo workflow's own namespace, shown next to it in the title bar.
+- `ns` (also `kubectl ns` / `k ns` — it's never sent to kubectl, which has no such command) lists the cluster's namespaces, numbered, with the current default marked. `ns <name>` sets the default Kubernetes namespace — every kubectl command after that runs as if you'd added `-n <name>`, shown next to the title — and `ns <number>` sets it by picking from the last listing. `ns -` (or `ns none`/`ns default`) clears it. It is added to **every** `kubectl` in the line, so `kubectl get workflow -o name | xargs -I{} kubectl patch {} ...` becomes `kubectl -n <name> get ... | xargs -I{} kubectl -n <name> patch ...`. That covers a `kubectl` after `|`, `&&`, `||`, `;`, `$(...)` or a wrapper such as `xargs`, `watch`, `timeout` or `env`. Each is judged on its own: one that already has `-n`/`--namespace` or `-A`/`--all-namespaces` is left alone, without affecting the others. Anything inside quotes (like a `-p '{...}'` payload) is never touched, and a `kubectl` that is only an argument (`grep kubectl`, `xargs echo kubectl`) isn't counted. This is a text heuristic, not a full shell parser, so unusual constructs (here-docs, `bash -c "..."`, aliases) aren't rewritten — put `-n` on those yourself. This is a client-side convenience only — it has nothing to do with the Argo workflow's own namespace, shown next to it in the title bar.
 
 Every command is a real workflow in the namespace, so it shows up in the workflow list and takes as long as a pod start (typically several seconds).
 
 ---
 
-## Optional: Token sync for the `argo` CLI
+## Optional: Token sync for terminal tools
 
-The extension can also read your Argo SSO session cookie and pass it to the `argo` CLI, so you can run `argo` from your terminal without re-authenticating.
+The extension can copy your Argo SSO session token out of the browser so that terminal tools can use it:
+
+- `~/.cache/argo-sso/tokens/<host>.json` for each host in the options host list, for scripts and tools that call the Argo API (`Authorization: <token>`).
+- `~/.cache/argo-sso/env` for the main host, if enabled. It holds `ARGO_SERVER`/`ARGO_TOKEN` for the `argo` CLI.
 
 ### How it works
 
-1. The extension reads the `authorization` cookie from the Argo UI.
-2. It sends the token to a **native messaging host** (`com.jprats.argo_submit`).
-3. The native host writes `~/.cache/argo-sso/env` with the environment variables that `argo` needs.
+1. The background worker reads the `authorization` cookie for each granted host, at browser start and whenever the cookie changes, so logging in again refreshes it.
+2. It sends the token to the **native messaging host** `com.jprats.argo_submit` ([host/argo_sso_host.py](host/argo_sso_host.py)).
+3. The host writes the files with mode 0600, inside directories with mode 0700. When a cookie is removed, it deletes that host's token file.
 
 ### Setup
 
-1. Install the native host (you'll need to create the host manifest — see `lib.js` for the host name `com.jprats.argo_submit`).
-2. In the extension's **Settings** page, set your Argo server host and tick "Keep `~/.cache/argo-sso/env` updated".
-3. Click **Write to ~/.cache/argo-sso/env** from the toolbar popup to test.
-
----
+1. Run `host/install.sh`. It registers the host for Chrome, Chrome Beta and Chromium. The extension ID is fixed by the `key` in `manifest.json`.
+2. Open the extension's **Settings**, add your Argo server hosts (one per line), click **Save and grant access** and approve.
+3. Log in to each Argo server. The settings page shows which hosts are granted.
 
 ## Development
 
@@ -131,7 +135,8 @@ The extension can also read your Argo SSO session cookie and pass it to the `arg
 | `shell.js` | kubectl/aws terminal (runs `admin-kubectl` / `admin-aws`, prints the output); also usable in Node |
 | `popup.html` / `popup.js` | Toolbar popup UI for token actions |
 | `popup-bulk.js` | Popup logic for enabling/disabling bulk per site |
-| `options.html` / `options.js` | Settings page for host configuration |
+| `options.html` / `options.js` | Settings page: token-sync host list and argo CLI host |
+| `host/argo_sso_host.py`, `host/install.sh` | Native messaging host that writes the token files, and its installer |
 
 ### Tests
 

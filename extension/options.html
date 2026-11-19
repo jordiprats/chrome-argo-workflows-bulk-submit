@@ -2,17 +2,30 @@
 <meta charset="utf-8">
 <title>Argo Submit settings</title>
 <style>
-  body { font: 14px system-ui, sans-serif; max-width: 520px; margin: 32px auto; }
+  body { font: 14px system-ui, sans-serif; max-width: 620px; margin: 32px auto; }
   label { display: block; margin: 14px 0 4px; }
-  input[type=text] { width: 100%; box-sizing: border-box; padding: 6px; }
+  input[type=text], textarea { width: 100%; box-sizing: border-box; padding: 6px; font: 12px ui-monospace, Menlo, monospace; }
   button { margin-top: 16px; padding: 6px 16px; }
   small { color: #666; }
+  ul { padding-left: 18px; font: 12px ui-monospace, Menlo, monospace; }
+  .ok { color: #1a7f37; } .bad { color: #cf222e; }
 </style>
 <h2>Argo Submit</h2>
-<small>These settings only affect the argo CLI token sync. The bulk-submit button does not need them
+<small>These settings only affect token sync. The bulk-submit button does not need them
 (enable it per site from the toolbar popup).</small>
-<label for="host">Argo server host</label>
+
+<h3>Token files</h3>
+<small>For each host below that you've granted access to, the session token is kept in
+<code>~/.cache/argo-sso/tokens/&lt;host&gt;.json</code> (needs the native host: <code>host/install.sh</code>).
+Log in to a host in this browser and its file is updated automatically.</small>
+<label for="syncHosts">Hosts (one per line)</label>
+<textarea id="syncHosts" rows="10" placeholder="argo.example.com"></textarea>
+<ul id="hostStatus"></ul>
+
+<h3>argo CLI</h3>
+<label for="host">Main Argo server host</label>
 <input id="host" type="text" placeholder="argo.example.com">
-<label><input id="writeFile" type="checkbox"> Keep <code>~/.cache/argo-sso/env</code> updated (needs the native host)</label>
-<button id="save">Save</button> <span id="msg"></span>
+<label><input id="writeFile" type="checkbox"> Also keep <code>~/.cache/argo-sso/env</code> updated for this host</label>
+
+<button id="save">Save and grant access</button> <span id="msg"></span>
 <script type="module" src="options.js"></script>

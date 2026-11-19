@@ -2,8 +2,24 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
   runCommand, normaliseCommand, parseInput, parseLogStream, stderrFromLog, artifactNodeId,
-  parseNsCommand, parseNamespaceList, hasNamespaceFlag, withNamespace,
+  parseNsCommand, parseNamespaceList, hasNamespaceFlag, withNamespace, wordLeft, wordRight,
 } = require('../extension/shell.js');
+
+test('wordLeft/wordRight move by whitespace-separated words like a shell', () => {
+  const t = 'get pods  -n  kube-system';
+  assert.equal(wordLeft(t, t.length), 14); // start of "kube-system"
+  assert.equal(wordLeft(t, 14), 10); // start of "-n"
+  assert.equal(wordLeft(t, 12), 10); // from inside a word to its start
+  assert.equal(wordLeft(t, 3), 0);
+  assert.equal(wordLeft(t, 0), 0);
+  assert.equal(wordRight(t, 0), 3); // end of "get"
+  assert.equal(wordRight(t, 3), 8); // end of "pods"
+  assert.equal(wordRight(t, 9), 12); // skips the gap, ends "-n"
+  assert.equal(wordRight(t, 15), t.length);
+  assert.equal(wordRight(t, t.length), t.length);
+  assert.equal(wordLeft('', 0), 0);
+  assert.equal(wordRight('', 0), 0);
+});
 
 test('kubectl prefix is optional', () => {
   assert.equal(normaliseCommand('get pods -A'), 'kubectl get pods -A');
@@ -96,6 +112,39 @@ test('withNamespace inserts -n right after kubectl, unless already namespaced or
   assert.equal(withNamespace('kubectl -n other get pods', 'kube-system'), 'kubectl -n other get pods');
   assert.equal(withNamespace('kubectl get pods -A', 'kube-system'), 'kubectl get pods -A');
   assert.equal(withNamespace('kubectl', 'kube-system'), 'kubectl -n kube-system');
+});
+
+test('withNamespace applies to every kubectl in a pipeline, each judged on its own', () => {
+  // the case from the bug report: the xargs'd kubectl must get it too, and the JSON payload is left alone
+  assert.equal(
+    withNamespace(`kubectl get workflow -o name | xargs -I{} kubectl patch {} --type=merge -p '{"metadata":{"finalizers":null}}'`, 'argo'),
+    `kubectl -n argo get workflow -o name | xargs -I{} kubectl -n argo patch {} --type=merge -p '{"metadata":{"finalizers":null}}'`);
+  assert.equal(withNamespace('kubectl get pods && kubectl get svc; kubectl get cm', 'x'),
+    'kubectl -n x get pods && kubectl -n x get svc; kubectl -n x get cm');
+  assert.equal(withNamespace('kubectl get pods || kubectl get svc', 'x'), 'kubectl -n x get pods || kubectl -n x get svc');
+  assert.equal(withNamespace('kubectl get pods | grep Running', 'x'), 'kubectl -n x get pods | grep Running');
+  assert.equal(withNamespace('FOO=1 kubectl get pods', 'x'), 'FOO=1 kubectl -n x get pods');
+  assert.equal(withNamespace('kubectl delete $(kubectl get pods -o name)', 'x'),
+    'kubectl -n x delete $(kubectl -n x get pods -o name)');
+  // one kubectl having -n / -A doesn't stop the others
+  assert.equal(withNamespace('kubectl get pods -n a | xargs kubectl describe', 'x'),
+    'kubectl get pods -n a | xargs kubectl -n x describe');
+  assert.equal(withNamespace('kubectl get pods -A | xargs -n1 kubectl get', 'x'),
+    'kubectl get pods -A | xargs -n1 kubectl -n x get');
+  // redirections are not separators
+  assert.equal(withNamespace('kubectl get pods 2>&1 -n a', 'x'), 'kubectl get pods 2>&1 -n a');
+});
+
+test('withNamespace ignores kubectl, pipes and flags inside quotes or as plain arguments', () => {
+  assert.equal(withNamespace(`kubectl get pods -l 'a=b;kubectl' | wc -l`, 'x'), `kubectl -n x get pods -l 'a=b;kubectl' | wc -l`);
+  assert.equal(withNamespace(`kubectl create cm c --from-literal=k="kubectl -n y"`, 'x'),
+    `kubectl -n x create cm c --from-literal=k="kubectl -n y"`);
+  assert.equal(withNamespace('kubectl get pods | grep kubectl', 'x'), 'kubectl -n x get pods | grep kubectl');
+  assert.equal(withNamespace('kubectl get pods | xargs echo kubectl', 'x'), 'kubectl -n x get pods | xargs echo kubectl');
+  // wrapper options with separate values
+  assert.equal(withNamespace('echo a | xargs -I {} -P 4 kubectl get {}', 'x'), 'echo a | xargs -I {} -P 4 kubectl -n x get {}');
+  assert.equal(withNamespace('timeout 30 kubectl get pods', 'x'), 'timeout 30 kubectl -n x get pods');
+  assert.equal(withNamespace('watch -n 2 kubectl get pods', 'x'), 'watch -n 2 kubectl -n x get pods');
 });
 
 const makeCtx = ({ phases, artifact, log, artifactName = 'kubectl-output', wfName = 'admin-kubectl-xyz' }) => {
