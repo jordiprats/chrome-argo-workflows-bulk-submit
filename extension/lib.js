@@ -18,10 +18,18 @@ export function cleanHost(input) {
   return (input || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/:443$/, '');
 }
 
-// The UI stores "Bearer v2:..." (possibly URL-encoded); make sure we always end up with the prefix.
+// The UI stores "Bearer v2:..." (possibly URL-encoded, and wrapped in double quotes); make sure we always end up
+// with a single `Bearer v2:...` and no quotes. A quoted cookie used to come out as `Bearer "Bearer v2:..."`, which
+// Argo rejects with 401.
 export function normalise(raw) {
   let v = raw;
   try { v = decodeURIComponent(raw); } catch { /* keep raw */ }
+  v = v.trim();
+  for (;;) {
+    const m = /^Bearer\s+"(.*)"$/is.exec(v) || /^"(.*)"$/s.exec(v);
+    if (!m) break;
+    v = m[1].trim();
+  }
   return /^Bearer /i.test(v) ? v : `Bearer ${v}`;
 }
 

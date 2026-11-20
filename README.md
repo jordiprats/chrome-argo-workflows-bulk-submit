@@ -111,7 +111,7 @@ The extension can copy your Argo SSO session token out of the browser so that te
 
 ### How it works
 
-1. The background worker reads the `authorization` cookie for each granted host, at browser start and whenever the cookie changes, so logging in again refreshes it.
+1. The background worker reads the `authorization` cookie for each granted host, at browser start and whenever the cookie changes, so logging in again refreshes it. Opening the **Shell** also syncs the host of the page it was opened on (for any host you granted access to, listed in the options or not), so a session that was already valid and hasn't changed gets its token file written or refreshed too. The stored token has the form `Bearer v2:...`, without quotes.
 2. It sends the token to the **native messaging host** `com.jprats.argo_submit` ([host/argo_sso_host.py](host/argo_sso_host.py)).
 3. The host writes the files with mode 0600, inside directories with mode 0700. When a cookie is removed, it deletes that host's token file.
 
@@ -141,5 +141,5 @@ The extension can copy your Argo SSO session token out of the browser so that te
 ### Tests
 
 ```bash
-node --test test/parse.test.js
+node --test test/parse.test.js test/shell.test.js test/lib.test.js
 ```

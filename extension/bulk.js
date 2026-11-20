@@ -415,8 +415,17 @@
 
   let shell = null;
 
+  // Opening the shell also refreshes this host's token file for terminal tools (the background worker does the
+  // work: content scripts can't use native messaging). Fire and forget; the shell never waits for it.
+  function syncToken() {
+    try {
+      chrome.runtime.sendMessage({ type: 'argo-sync-host' }).catch(() => {});
+    } catch { /* extension was reloaded or updated: this tab needs a refresh */ }
+  }
+
   function openShell() {
     if (shell || !globalThis.ArgoShell) return;
+    syncToken();
     shell = globalThis.ArgoShell.openShell({
       api, basePath, currentNamespace, h, sleep, targetsFromTemplates, onClose: () => { shell = null; },
     });

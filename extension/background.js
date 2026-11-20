@@ -33,6 +33,23 @@ chrome.runtime.onInstalled.addListener(sync);
 chrome.storage.onChanged.addListener(sync);
 chrome.permissions.onAdded.addListener(sync);
 
+// The Shell button (content script, which can't use native messaging) asks for its own host to be synced, so
+// opening the shell refreshes ~/.cache/argo-sso/tokens/<host>.json even when the session cookie hasn't changed
+// since the browser started. Works for any host the user granted access to, whether or not it is in the options list.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== 'argo-sync-host' || !sender.url) return;
+  let host;
+  try { host = new URL(sender.url).host; } catch { return; }
+  (async () => {
+    if (!(await chrome.permissions.contains({ origins: [`https://${host}/*`] }))) {
+      return sendResponse({ ok: false, error: 'no permission' });
+    }
+    await syncHost(host);
+    sendResponse({ ok: true, host });
+  })();
+  return true; // async response
+});
+
 // Bulk submit: keep the content-script registrations in step with the sites the user has granted.
 chrome.permissions.onAdded.addListener(syncBulk);
 chrome.permissions.onRemoved.addListener(syncBulk);
